@@ -188,4 +188,26 @@ public class ScalarFunctions {
       return firstGeometry.isEmpty() || secondGeometry.isEmpty() ? Double.NaN : firstGeometry.distance(secondGeometry);
     }
   }
+
+  @ScalarFunction(names = {"stContains", "st_contains"})
+  public static int stContains(byte[] firstPoint, byte[] secondPoint) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(firstPoint);
+    Geometry secondGeometry = GeometrySerializer.deserialize(secondPoint);
+    if (GeometryUtils.isGeography(firstGeometry) != GeometryUtils.isGeography(secondGeometry)) {
+      throw new RuntimeException("The first and second arguments should either both be geometry or both be geography");
+    }
+    // TODO: to fully support Geography contains operation.
+    return firstGeometry.contains(secondGeometry) ? 1 : 0;
+  }
+
+  @ScalarFunction(names = {"stWithin", "st_within"})
+  public static int stWithin(byte[] firstPoint, byte[] secondPoint) {
+    Geometry firstGeometry = GeometrySerializer.deserialize(firstPoint);
+    Geometry secondGeometry = GeometrySerializer.deserialize(secondPoint);
+    if (GeometryUtils.isGeography(firstGeometry) != GeometryUtils.isGeography(secondGeometry)) {
+      throw new RuntimeException("The first and second arguments should either both be geometry or both be geography");
+    }
+    // TODO: to fully support Geography within operation.
+    return firstGeometry.within(secondGeometry) ? 1 : 0;
+  }
 }
