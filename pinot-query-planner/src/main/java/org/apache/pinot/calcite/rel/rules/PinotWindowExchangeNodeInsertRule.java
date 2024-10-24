@@ -61,7 +61,6 @@ import org.apache.pinot.calcite.rel.logical.PinotLogicalSortExchange;
  *     2. Add support for functions other than:
  *        a. Aggregation functions (AVG, COUNT, MAX, MIN, SUM, BOOL_AND, BOOL_OR)
  *        b. Ranking functions (ROW_NUMBER, RANK, DENSE_RANK)
- *     3. Add support for custom frames
  */
 public class PinotWindowExchangeNodeInsertRule extends RelOptRule {
   public static final PinotWindowExchangeNodeInsertRule INSTANCE =
@@ -73,9 +72,6 @@ public class PinotWindowExchangeNodeInsertRule extends RelOptRule {
       EnumSet.of(SqlKind.SUM, SqlKind.SUM0, SqlKind.MIN, SqlKind.MAX, SqlKind.COUNT, SqlKind.ROW_NUMBER, SqlKind.RANK,
           SqlKind.DENSE_RANK, SqlKind.LAG, SqlKind.LEAD, SqlKind.FIRST_VALUE, SqlKind.LAST_VALUE,
           SqlKind.OTHER_FUNCTION);
-
-  private static final EnumSet<SqlKind> RANK_BASED_FUNCTION_KIND =
-      EnumSet.of(SqlKind.ROW_NUMBER, SqlKind.RANK, SqlKind.DENSE_RANK);
 
   public PinotWindowExchangeNodeInsertRule(RelBuilderFactory factory) {
     super(operand(Window.class, any()), factory, null);
@@ -191,19 +187,23 @@ public class PinotWindowExchangeNodeInsertRule extends RelOptRule {
     RexNode offset = lowerBound.getOffset();
     if (offset != null) {
       RexLiteral literal = getLiteral(offset, numInputFields, window.constants, projects);
-      if (literal != null) {
-        lowerBound = lowerBound.isPreceding() ? RexWindowBounds.preceding(literal) : RexWindowBounds.following(literal);
-        windowChanged = true;
+      if (literal == null) {
+        throw new IllegalStateException(
+            "Could not read window lower bound literal value from window group: " + oldWindowGroup);
       }
+      lowerBound = lowerBound.isPreceding() ? RexWindowBounds.preceding(literal) : RexWindowBounds.following(literal);
+      windowChanged = true;
     }
     RexWindowBound upperBound = oldWindowGroup.upperBound;
     offset = upperBound.getOffset();
     if (offset != null) {
       RexLiteral literal = getLiteral(offset, numInputFields, window.constants, projects);
-      if (literal != null) {
-        upperBound = lowerBound.isFollowing() ? RexWindowBounds.following(literal) : RexWindowBounds.preceding(literal);
-        windowChanged = true;
+      if (literal == null) {
+        throw new IllegalStateException(
+            "Could not read window upper bound literal value from window group: " + oldWindowGroup);
       }
+      upperBound = lowerBound.isFollowing() ? RexWindowBounds.following(literal) : RexWindowBounds.preceding(literal);
+      windowChanged = true;
     }
 
     return windowChanged ? new Window.Group(oldWindowGroup.keys, oldWindowGroup.isRows, lowerBound, upperBound,
