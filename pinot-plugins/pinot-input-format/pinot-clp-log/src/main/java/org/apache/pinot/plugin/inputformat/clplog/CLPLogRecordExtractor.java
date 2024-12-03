@@ -22,7 +22,6 @@ import com.yscope.clp.compressorfrontend.BuiltInVariableHandlingRuleVersions;
 import com.yscope.clp.compressorfrontend.EncodedMessage;
 import com.yscope.clp.compressorfrontend.MessageEncoder;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -79,7 +78,7 @@ public class CLPLogRecordExtractor extends BaseRecordExtractor<Map<String, Objec
     _config = (CLPLogRecordExtractorConfig) recordExtractorConfig;
     if (fields == null || fields.isEmpty()) {
       _extractAll = true;
-      _fields = Collections.emptySet();
+      _fields = Set.of();
     } else {
       _fields = new HashSet<>(fields);
       // Remove the fields to be CLP-encoded to make it easier to work with them
