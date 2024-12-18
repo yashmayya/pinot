@@ -22,13 +22,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.plan.maker.InstancePlanMakerImplV2;
@@ -293,5 +297,98 @@ public class IndexedTableTest {
     indexedTable.finish(false);
 
     checkEvicted(indexedTable, "f", "g");
+  }
+
+  @Test
+  public void testMultiThreadedConcurrentIndexedTableInsert()
+      throws InterruptedException {
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(
+        "SELECT MAX(c2) FROM testTable GROUP BY c1");
+    DataSchema dataSchema = new DataSchema(new String[]{"c1", "c2", "max(c2)"},
+        new ColumnDataType[]{ColumnDataType.DOUBLE, ColumnDataType.DOUBLE, ColumnDataType.DOUBLE});
+    IndexedTable indexedTable =
+        new ConcurrentIndexedTable(dataSchema, false, queryContext, Integer.MAX_VALUE, Integer.MAX_VALUE,
+            Integer.MAX_VALUE, INITIAL_CAPACITY);
+
+    ExecutorService executorService = Executors.newFixedThreadPool(10);
+
+    for (int i = 0; i < 10; i++) {
+      executorService.submit(() -> {
+        try {
+          Random random = ThreadLocalRandom.current();
+          for (int j = 0; j < 100_000_000; j++) {
+            int c1 = random.nextInt(100);
+            int c2 = random.nextInt(100);
+            indexedTable.upsert(getKey(new Object[]{(double) c1}), getRecord(new Object[]{(double) c1, (double) c2}));
+          }
+        } catch (Exception e) {
+          e.printStackTrace();
+        }
+      });
+    }
+
+    executorService.shutdown();
+    executorService.awaitTermination(60_000, TimeUnit.MILLISECONDS);
+  }
+
+  @Test
+  public void testMultiThreadedNoContentionIndexedTableInsert()
+      throws Exception {
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(
+        "SELECT MAX(c2) FROM testTable GROUP BY c1");
+    DataSchema dataSchema = new DataSchema(new String[]{"c1", "c2", "max(c2)"},
+        new ColumnDataType[]{ColumnDataType.DOUBLE, ColumnDataType.DOUBLE, ColumnDataType.DOUBLE});
+
+    AtomicReference<IndexedTable> globalIndexedTable = new AtomicReference<>();
+    ExecutorService executorService = Executors.newFixedThreadPool(10);
+
+    for (int i = 0; i < 10; i++) {
+      executorService.submit(() -> {
+        try {
+          Random random = ThreadLocalRandom.current();
+          IndexedTable localIndexedTable = new SimpleIndexedTable(dataSchema, false, queryContext, Integer.MAX_VALUE,
+              Integer.MAX_VALUE, Integer.MAX_VALUE, INITIAL_CAPACITY);
+
+          for (int j = 0; j < 100_000_000; j++) {
+            int c1 = random.nextInt(100);
+            int c2 = random.nextInt(100);
+            localIndexedTable.upsert(getKey(new Object[]{(double) c1}),
+                getRecord(new Object[]{(double) c1, (double) c2}));
+          }
+
+          updateGlobalIndexedTable(globalIndexedTable, localIndexedTable);
+        } catch (Exception e) {
+          e.printStackTrace();
+        }
+      });
+    }
+
+    executorService.shutdown();
+    executorService.awaitTermination(60_000, TimeUnit.MILLISECONDS);
+  }
+
+  private void updateGlobalIndexedTable(AtomicReference<IndexedTable> globalIndexedTable,
+      IndexedTable localIndexedTable) {
+    IndexedTable globalTable;
+    // Atomically retrieve and nullify the reference
+    while ((globalTable = globalIndexedTable.getAndSet(null)) != null) {
+      System.out.println("Merging local table into global table");
+      // Merge the local table into the retrieved table
+      for (Map.Entry<Key, Record> kv : localIndexedTable._lookupMap.entrySet()) {
+        globalTable.upsert(kv.getKey(), kv.getValue());
+      }
+
+      // Atomically attempt to set the updated table back into the reference
+      if (globalIndexedTable.compareAndSet(null, globalTable)) {
+        // Successfully updated the global table
+        return;
+      }
+    }
+
+    if (globalIndexedTable.compareAndSet(null, localIndexedTable)) {
+      System.out.println("Set global table");
+    } else {
+      updateGlobalIndexedTable(globalIndexedTable, localIndexedTable);
+    }
   }
 }

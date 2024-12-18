@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.tools.admin.PinotAdministrator;
 import org.apache.pinot.tools.admin.command.QuickstartRunner;
@@ -99,6 +100,7 @@ public class NullHandlingQuickstart extends Quickstart {
 
   public static void main(String[] args)
       throws Exception {
+    TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
     List<String> arguments = new ArrayList<>();
     arguments.addAll(Arrays.asList("QuickStart", "-type", "NULL_HANDLING"));
     arguments.addAll(Arrays.asList(args));
