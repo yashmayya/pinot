@@ -230,6 +230,11 @@ public class CommonConstants {
 
     public static final String CONFIG_OF_MULTI_STAGE_ENGINE_ENABLED = "pinot.multistage.engine.enabled";
     public static final boolean DEFAULT_MULTI_STAGE_ENGINE_ENABLED = true;
+
+    // This is a "beta" config and can be changed or even removed in future releases.
+    public static final String CONFIG_OF_MAX_CONCURRENT_MULTI_STAGE_QUERIES =
+        "pinot.beta.multistage.engine.max.server.concurrent.queries";
+    public static final String DEFAULT_MAX_CONCURRENT_MULTI_STAGE_QUERIES = "-1";
   }
 
   public static class Broker {
