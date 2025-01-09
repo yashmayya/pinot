@@ -88,6 +88,7 @@ public class QueryEnvironmentTestBase {
         .addSingleValueDimension("col2", FieldSpec.DataType.STRING, "")
         .addSingleValueDimension("col5", FieldSpec.DataType.BOOLEAN, false)
         .addDateTime("ts", FieldSpec.DataType.LONG, "1:MILLISECONDS:EPOCH", "1:HOURS")
+        .addDateTime("ts_timestamp", FieldSpec.DataType.TIMESTAMP, "1:MILLISECONDS:EPOCH", "1:HOURS")
         .addMetric("col3", FieldSpec.DataType.INT, 0)
         .addMetric("col4", FieldSpec.DataType.BIG_DECIMAL, 0)
         .addMetric("col6", FieldSpec.DataType.INT, 0)
@@ -231,6 +232,10 @@ public class QueryEnvironmentTestBase {
             "SELECT /*+ aggOptions(is_skip_leaf_stage_group_by='true') */ a.col2, a.col3 FROM a JOIN b "
                 + "ON a.col1 = b.col1  WHERE a.col3 >= 0 GROUP BY a.col2, a.col3"
         },
+        new Object[]{"SELECT ts_timestamp - CAST(123456789 AS TIMESTAMP) FROM a"},
+        new Object[]{"SELECT SUB(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"},
+        new Object[]{"SELECT ts_timestamp + CAST(123456789 AS TIMESTAMP) FROM a"},
+        new Object[]{"SELECT ADD(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"}
     };
   }
 
