@@ -232,6 +232,9 @@ public class QueryEnvironmentTestBase {
             "SELECT /*+ aggOptions(is_skip_leaf_stage_group_by='true') */ a.col2, a.col3 FROM a JOIN b "
                 + "ON a.col1 = b.col1  WHERE a.col3 >= 0 GROUP BY a.col2, a.col3"
         },
+        new Object[]{"SELECT ts_timestamp FROM a WHERE ts_timestamp BETWEEN TIMESTAMP '2016-01-01 00:00:00' AND "
+            + "TIMESTAMP '2016-01-01 10:00:00'"},
+        new Object[]{"SELECT ts_timestamp FROM a WHERE ts_timestamp >= CAST(1454284798000 AS TIMESTAMP)"},
         new Object[]{"SELECT ts_timestamp - CAST(123456789 AS TIMESTAMP) FROM a"},
         new Object[]{"SELECT SUB(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"},
         new Object[]{"SELECT ts_timestamp + CAST(123456789 AS TIMESTAMP) FROM a"},
