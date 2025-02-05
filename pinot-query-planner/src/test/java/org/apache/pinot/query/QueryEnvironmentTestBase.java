@@ -238,7 +238,8 @@ public class QueryEnvironmentTestBase {
         new Object[]{"SELECT ts_timestamp - CAST(123456789 AS TIMESTAMP) FROM a"},
         new Object[]{"SELECT SUB(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"},
         new Object[]{"SELECT ts_timestamp + CAST(123456789 AS TIMESTAMP) FROM a"},
-        new Object[]{"SELECT ADD(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"}
+        new Object[]{"SELECT ADD(ts_timestamp, CAST(123456789 AS TIMESTAMP)) FROM a"},
+        new Object[]{"SELECT DAY_OF_WEEK(ts_timestamp, 'UTC') FROM a"}
     };
   }
 
