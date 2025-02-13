@@ -287,548 +287,556 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     Tracing.ThreadAccountantOps.setupRunner(String.valueOf(requestId));
 
     try {
-      // Compile the request into PinotQuery
-      long compilationStartTimeNs = System.nanoTime();
-      PinotQuery pinotQuery;
-      try {
-        pinotQuery = CalciteSqlParser.compileToPinotQuery(sqlNodeAndOptions);
-      } catch (Exception e) {
-        LOGGER.info("Caught exception while compiling SQL request {}: {}, {}", requestId, query, e.getMessage());
-        _brokerMetrics.addMeteredGlobalValue(BrokerMeter.REQUEST_COMPILATION_EXCEPTIONS, 1);
-        requestContext.setErrorCode(QueryException.SQL_PARSING_ERROR_CODE);
-        // Check if the query is a v2 supported query
-        String database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
-        if (ParserUtils.canCompileWithMultiStageEngine(query, database, _tableCache)) {
-          return new BrokerResponseNative(QueryException.getException(QueryException.SQL_PARSING_ERROR, new Exception(
-              "It seems that the query is only supported by the multi-stage query engine, please retry the query using "
-                  + "the multi-stage query engine "
-                  + "(https://docs.pinot.apache.org/developers/advanced/v2-multi-stage-query-engine)")));
-        } else {
-          return new BrokerResponseNative(QueryException.getException(QueryException.SQL_PARSING_ERROR, e));
-        }
-      }
-
-      if (isLiteralOnlyQuery(pinotQuery)) {
-        LOGGER.debug("Request {} contains only Literal, skipping server query: {}", requestId, query);
-        try {
-          if (pinotQuery.isExplain()) {
-            // EXPLAIN PLAN results to show that query is evaluated exclusively by Broker.
-            return BrokerResponseNative.BROKER_ONLY_EXPLAIN_PLAN_OUTPUT;
-          }
-          return processLiteralOnlyQuery(requestId, pinotQuery, requestContext);
-        } catch (Exception e) {
-          // TODO: refine the exceptions here to early termination the queries won't requires to send to servers.
-          LOGGER.warn("Unable to execute literal request {}: {} at broker, fallback to server query. {}", requestId,
-              query, e.getMessage());
-        }
-      }
-
-      PinotQuery serverPinotQuery = GapfillUtils.stripGapfill(pinotQuery);
-      DataSource dataSource = serverPinotQuery.getDataSource();
-      if (dataSource == null) {
-        LOGGER.info("Data source (FROM clause) not found in request {}: {}", requestId, query);
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        return new BrokerResponseNative(
-            QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Data source (FROM clause) not found"));
-      }
-      if (dataSource.getJoin() != null) {
-        LOGGER.info("JOIN is not supported in request {}: {}", requestId, query);
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        return new BrokerResponseNative(
-            QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "JOIN is not supported"));
-      }
-      if (dataSource.getTableName() == null) {
-        LOGGER.info("Table name not found in request {}: {}", requestId, query);
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        return new BrokerResponseNative(
-            QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Table name not found"));
-      }
-
-      try {
-        handleSubquery(serverPinotQuery, requestId, request, requesterIdentity, requestContext, httpHeaders,
-            accessControl);
-      } catch (Exception e) {
-        LOGGER.info("Caught exception while handling the subquery in request {}: {}, {}", requestId, query,
-            e.getMessage());
-        requestContext.setErrorCode(QueryException.QUERY_EXECUTION_ERROR_CODE);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
-      }
-
-      boolean ignoreCase = _tableCache.isIgnoreCase();
-      String tableName;
-      try {
-        tableName =
-            getActualTableName(DatabaseUtils.translateTableName(dataSource.getTableName(), httpHeaders, ignoreCase),
-                _tableCache);
-      } catch (DatabaseConflictException e) {
-        LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, query);
-        _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
-      }
-      dataSource.setTableName(tableName);
-      String rawTableName = TableNameBuilder.extractRawTableName(tableName);
-      requestContext.setTableName(rawTableName);
-
-      try {
-        Map<String, String> columnNameMap = _tableCache.getColumnNameMap(rawTableName);
-        if (columnNameMap != null) {
-          updateColumnNames(rawTableName, serverPinotQuery, ignoreCase, columnNameMap);
-        }
-      } catch (Exception e) {
-        // Throw exceptions with column in-existence error.
-        if (e instanceof BadQueryRequestException) {
-          LOGGER.info("Caught exception while checking column names in request {}: {}, {}", requestId, query,
-              e.getMessage());
-          requestContext.setErrorCode(QueryException.UNKNOWN_COLUMN_ERROR_CODE);
-          _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.UNKNOWN_COLUMN_EXCEPTIONS, 1);
-          return new BrokerResponseNative(QueryException.getException(QueryException.UNKNOWN_COLUMN_ERROR, e));
-        }
-        LOGGER.warn("Caught exception while updating column names in request {}: {}, {}", requestId, query,
-            e.getMessage());
-      }
-      if (_defaultHllLog2m > 0) {
-        handleHLLLog2mOverride(serverPinotQuery, _defaultHllLog2m);
-      }
-      if (_enableQueryLimitOverride) {
-        handleQueryLimitOverride(serverPinotQuery, _queryResponseLimit);
-      }
-      handleSegmentPartitionedDistinctCountOverride(serverPinotQuery,
-          getSegmentPartitionedColumns(_tableCache, tableName));
-      if (_enableDistinctCountBitmapOverride) {
-        handleDistinctCountBitmapOverride(serverPinotQuery);
-      }
-
-      Schema schema = _tableCache.getSchema(rawTableName);
-      if (schema != null) {
-        handleDistinctMultiValuedOverride(serverPinotQuery, schema);
-      }
-
-      long compilationEndTimeNs = System.nanoTime();
-      // full request compile time = compilationTimeNs + parserTimeNs
-      _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.REQUEST_COMPILATION,
-          (compilationEndTimeNs - compilationStartTimeNs) + sqlNodeAndOptions.getParseTimeNs());
-
-      // Second-stage table-level access control
-      // TODO: Modify AccessControl interface to directly take PinotQuery
-      BrokerRequest brokerRequest = CalciteSqlCompiler.convertToBrokerRequest(pinotQuery);
-      BrokerRequest serverBrokerRequest =
-          serverPinotQuery == pinotQuery ? brokerRequest : CalciteSqlCompiler.convertToBrokerRequest(serverPinotQuery);
-      AuthorizationResult authorizationResult = accessControl.authorize(requesterIdentity, serverBrokerRequest);
-      if (authorizationResult.hasAccess()) {
-        authorizationResult = accessControl.authorize(httpHeaders, TargetType.TABLE, tableName, Actions.Table.QUERY);
-      }
-
-      _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.AUTHORIZATION,
-          System.nanoTime() - compilationEndTimeNs);
-
-      if (!authorizationResult.hasAccess()) {
-        _brokerMetrics.addMeteredTableValue(tableName, BrokerMeter.REQUEST_DROPPED_DUE_TO_ACCESS_ERROR, 1);
-        LOGGER.info("Access denied for request {}: {}, table: {}, reason :{}", requestId, query, tableName,
-            authorizationResult.getFailureMessage());
-        requestContext.setErrorCode(QueryException.ACCESS_DENIED_ERROR_CODE);
-        String failureMessage = authorizationResult.getFailureMessage();
-        if (StringUtils.isNotBlank(failureMessage)) {
-          failureMessage = "Reason: " + failureMessage;
-        }
-        throw new WebApplicationException("Permission denied." + failureMessage, Response.Status.FORBIDDEN);
-      }
-
-      // Get the tables hit by the request
-      String offlineTableName = null;
-      String realtimeTableName = null;
-      TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
-      if (tableType == TableType.OFFLINE) {
-        // Offline table
-        if (_routingManager.routingExists(tableName)) {
-          offlineTableName = tableName;
-        }
-      } else if (tableType == TableType.REALTIME) {
-        // Realtime table
-        if (_routingManager.routingExists(tableName)) {
-          realtimeTableName = tableName;
-        }
-      } else {
-        // Hybrid table (check both OFFLINE and REALTIME)
-        String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-        if (_routingManager.routingExists(offlineTableNameToCheck)) {
-          offlineTableName = offlineTableNameToCheck;
-        }
-        String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
-        if (_routingManager.routingExists(realtimeTableNameToCheck)) {
-          realtimeTableName = realtimeTableNameToCheck;
-        }
-      }
-
-      TableConfig offlineTableConfig =
-          _tableCache.getTableConfig(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
-      TableConfig realtimeTableConfig =
-          _tableCache.getTableConfig(TableNameBuilder.REALTIME.tableNameWithType(rawTableName));
-
-      if (offlineTableName == null && realtimeTableName == null) {
-        // No table matches the request
-        if (realtimeTableConfig == null && offlineTableConfig == null) {
-          LOGGER.info("Table not found for request {}: {}", requestId, query);
-          requestContext.setErrorCode(QueryException.TABLE_DOES_NOT_EXIST_ERROR_CODE);
-          return BrokerResponseNative.TABLE_DOES_NOT_EXIST;
-        }
-        LOGGER.info("No table matches for request {}: {}", requestId, query);
-        requestContext.setErrorCode(QueryException.BROKER_RESOURCE_MISSING_ERROR_CODE);
-        _brokerMetrics.addMeteredGlobalValue(BrokerMeter.RESOURCE_MISSING_EXCEPTIONS, 1);
-        return BrokerResponseNative.NO_TABLE_RESULT;
-      }
-
-      // Handle query rewrite that can be overridden by the table configs
-      if (offlineTableName == null) {
-        offlineTableConfig = null;
-      }
-      if (realtimeTableName == null) {
-        realtimeTableConfig = null;
-      }
-      HandlerContext handlerContext = getHandlerContext(offlineTableConfig, realtimeTableConfig);
-      if (handlerContext._disableGroovy) {
-        rejectGroovyQuery(serverPinotQuery);
-      }
-      if (handlerContext._useApproximateFunction) {
-        handleApproximateFunctionOverride(serverPinotQuery);
-      }
-
-      // Validate QPS quota
-      String database = DatabaseUtils.extractDatabaseFromFullyQualifiedTableName(tableName);
-      if (!_queryQuotaManager.acquireDatabase(database)) {
-        String errorMessage =
-            String.format("Request %d: %s exceeds query quota for database: %s", requestId, query, database);
-        LOGGER.info(errorMessage);
-        requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
-      }
-      if (!_queryQuotaManager.acquire(tableName)) {
-        String errorMessage =
-            String.format("Request %d: %s exceeds query quota for table: %s", requestId, query, tableName);
-        LOGGER.info(errorMessage);
-        requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
-        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERY_QUOTA_EXCEEDED, 1);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
-      }
-
-      // Validate the request
-      try {
-        validateRequest(serverPinotQuery, _queryResponseLimit);
-      } catch (Exception e) {
-        LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
-      }
-
-      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERIES, 1);
-      _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERIES_GLOBAL, 1);
-      _brokerMetrics.addValueToTableGauge(rawTableName, BrokerGauge.REQUEST_SIZE, query.length());
-
-      if (!pinotQuery.isExplain() && _enableMultistageMigrationMetric) {
-        // Check if the query is a v2 supported query
-        database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
-        // Attempt to add the query to the compile queue; drop if queue is full
-        if (!_multistageCompileQueryQueue.offer(Pair.of(query, database))) {
-          LOGGER.trace("Not compiling query `{}` using the multi-stage query engine because the query queue is full",
-              query);
-        }
-      }
-
-      // Prepare OFFLINE and REALTIME requests
-      BrokerRequest offlineBrokerRequest = null;
-      BrokerRequest realtimeBrokerRequest = null;
-      TimeBoundaryInfo timeBoundaryInfo = null;
-      if (offlineTableName != null && realtimeTableName != null) {
-        // Time boundary info might be null when there is no segment in the offline table, query real-time side only
-        timeBoundaryInfo = _routingManager.getTimeBoundaryInfo(offlineTableName);
-        if (timeBoundaryInfo == null) {
-          LOGGER.debug("No time boundary info found for hybrid table: {}", rawTableName);
-          offlineTableName = null;
-        }
-      }
-      if (offlineTableName != null && realtimeTableName != null) {
-        // Hybrid
-        PinotQuery offlinePinotQuery = serverPinotQuery.deepCopy();
-        offlinePinotQuery.getDataSource().setTableName(offlineTableName);
-        attachTimeBoundary(offlinePinotQuery, timeBoundaryInfo, true);
-        handleExpressionOverride(offlinePinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
-        handleTimestampIndexOverride(offlinePinotQuery, offlineTableConfig);
-        _queryOptimizer.optimize(offlinePinotQuery, offlineTableConfig, schema);
-        offlineBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(offlinePinotQuery);
-
-        PinotQuery realtimePinotQuery = serverPinotQuery.deepCopy();
-        realtimePinotQuery.getDataSource().setTableName(realtimeTableName);
-        attachTimeBoundary(realtimePinotQuery, timeBoundaryInfo, false);
-        handleExpressionOverride(realtimePinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
-        handleTimestampIndexOverride(realtimePinotQuery, realtimeTableConfig);
-        _queryOptimizer.optimize(realtimePinotQuery, realtimeTableConfig, schema);
-        realtimeBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(realtimePinotQuery);
-
-        requestContext.setFanoutType(RequestContext.FanoutType.HYBRID);
-        requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
-        requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
-      } else if (offlineTableName != null) {
-        // OFFLINE only
-        setTableName(serverBrokerRequest, offlineTableName);
-        handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
-        handleTimestampIndexOverride(serverPinotQuery, offlineTableConfig);
-        _queryOptimizer.optimize(serverPinotQuery, offlineTableConfig, schema);
-        offlineBrokerRequest = serverBrokerRequest;
-
-        requestContext.setFanoutType(RequestContext.FanoutType.OFFLINE);
-        requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
-      } else {
-        // REALTIME only
-        setTableName(serverBrokerRequest, realtimeTableName);
-        handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
-        handleTimestampIndexOverride(serverPinotQuery, realtimeTableConfig);
-        _queryOptimizer.optimize(serverPinotQuery, realtimeTableConfig, schema);
-        realtimeBrokerRequest = serverBrokerRequest;
-
-        requestContext.setFanoutType(RequestContext.FanoutType.REALTIME);
-        requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
-      }
-
-      // Check if response can be sent without server query evaluation.
-      if (offlineBrokerRequest != null && isFilterAlwaysFalse(offlineBrokerRequest.getPinotQuery())) {
-        // We don't need to evaluate offline request
-        offlineBrokerRequest = null;
-      }
-      if (realtimeBrokerRequest != null && isFilterAlwaysFalse(realtimeBrokerRequest.getPinotQuery())) {
-        // We don't need to evaluate realtime request
-        realtimeBrokerRequest = null;
-      }
-
-      if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
-        return getEmptyBrokerOnlyResponse(pinotQuery, requestContext, tableName, requesterIdentity);
-      }
-
-      if (offlineBrokerRequest != null && isFilterAlwaysTrue(offlineBrokerRequest.getPinotQuery())) {
-        // Drop offline request filter since it is always true
-        offlineBrokerRequest.getPinotQuery().setFilterExpression(null);
-      }
-      if (realtimeBrokerRequest != null && isFilterAlwaysTrue(realtimeBrokerRequest.getPinotQuery())) {
-        // Drop realtime request filter since it is always true
-        realtimeBrokerRequest.getPinotQuery().setFilterExpression(null);
-      }
-
-      // Calculate routing table for the query
-      // TODO: Modify RoutingManager interface to directly take PinotQuery
-      long routingStartTimeNs = System.nanoTime();
-      Map<ServerInstance, Pair<List<String>, List<String>>> offlineRoutingTable = null;
-      Map<ServerInstance, Pair<List<String>, List<String>>> realtimeRoutingTable = null;
-      List<String> unavailableSegments = new ArrayList<>();
-      int numPrunedSegmentsTotal = 0;
-      if (offlineBrokerRequest != null) {
-        // NOTE: Routing table might be null if table is just removed
-        RoutingTable routingTable = _routingManager.getRoutingTable(offlineBrokerRequest, requestId);
-        if (routingTable != null) {
-          unavailableSegments.addAll(routingTable.getUnavailableSegments());
-          Map<ServerInstance, Pair<List<String>, List<String>>> serverInstanceToSegmentsMap =
-              routingTable.getServerInstanceToSegmentsMap();
-          if (!serverInstanceToSegmentsMap.isEmpty()) {
-            offlineRoutingTable = serverInstanceToSegmentsMap;
-          } else {
-            offlineBrokerRequest = null;
-          }
-          numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
-        } else {
-          offlineBrokerRequest = null;
-        }
-      }
-      if (realtimeBrokerRequest != null) {
-        // NOTE: Routing table might be null if table is just removed
-        RoutingTable routingTable = _routingManager.getRoutingTable(realtimeBrokerRequest, requestId);
-        if (routingTable != null) {
-          unavailableSegments.addAll(routingTable.getUnavailableSegments());
-          Map<ServerInstance, Pair<List<String>, List<String>>> serverInstanceToSegmentsMap =
-              routingTable.getServerInstanceToSegmentsMap();
-          if (!serverInstanceToSegmentsMap.isEmpty()) {
-            realtimeRoutingTable = serverInstanceToSegmentsMap;
-          } else {
-            realtimeBrokerRequest = null;
-          }
-          numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
-        } else {
-          realtimeBrokerRequest = null;
-        }
-      }
-      int numUnavailableSegments = unavailableSegments.size();
-      requestContext.setNumUnavailableSegments(numUnavailableSegments);
-
-      List<ProcessingException> exceptions = new ArrayList<>();
-      if (numUnavailableSegments > 0) {
-        String errorMessage;
-        if (numUnavailableSegments > MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION) {
-          errorMessage = String.format("%d segments unavailable, sampling %d: %s", numUnavailableSegments,
-              MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION,
-              unavailableSegments.subList(0, MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION));
-        } else {
-          errorMessage = String.format("%d segments unavailable: %s", numUnavailableSegments, unavailableSegments);
-        }
-        String realtimeRoutingPolicy = realtimeBrokerRequest != null ? getRoutingPolicy(realtimeTableConfig) : null;
-        String offlineRoutingPolicy = offlineBrokerRequest != null ? getRoutingPolicy(offlineTableConfig) : null;
-        errorMessage = addRoutingPolicyInErrMsg(errorMessage, realtimeRoutingPolicy, offlineRoutingPolicy);
-        exceptions.add(QueryException.getException(QueryException.BROKER_SEGMENT_UNAVAILABLE_ERROR, errorMessage));
-        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.BROKER_RESPONSES_WITH_UNAVAILABLE_SEGMENTS, 1);
-      }
-
-      if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
-        if (!exceptions.isEmpty()) {
-          LOGGER.info("No server found for request {}: {}", requestId, query);
-          _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.NO_SERVER_FOUND_EXCEPTIONS, 1);
-          return new BrokerResponseNative(exceptions);
-        } else {
-          // When all segments have been pruned, we can just return an empty response.
-          return getEmptyBrokerOnlyResponse(pinotQuery, requestContext, tableName, requesterIdentity);
-        }
-      }
-      long routingEndTimeNs = System.nanoTime();
-      _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_ROUTING,
-          routingEndTimeNs - routingStartTimeNs);
-
-      // Set timeout in the requests
-      long timeSpentMs = TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
-      // Remaining time in milliseconds for the server query execution
-      // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
-      //       configured, but if necessary, we also allow different timeout for them.
-      //       If the timeout is not the same for offline table and real-time table, use the max of offline table
-      //       remaining time and realtime table remaining time. Server side will have different remaining time set for
-      //       each table type, and broker should wait for both types to return.
-      long remainingTimeMs = 0;
-      try {
-        if (offlineBrokerRequest != null) {
-          remainingTimeMs =
-              setQueryTimeout(offlineTableName, offlineBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs);
-        }
-        if (realtimeBrokerRequest != null) {
-          remainingTimeMs = Math.max(remainingTimeMs,
-              setQueryTimeout(realtimeTableName, realtimeBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs));
-        }
-      } catch (TimeoutException e) {
-        String errorMessage = e.getMessage();
-        LOGGER.info("{} {}: {}", errorMessage, requestId, query);
-        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_TIMEOUT_BEFORE_SCATTERED_EXCEPTIONS, 1);
-        exceptions.add(QueryException.getException(QueryException.BROKER_TIMEOUT_ERROR, errorMessage));
-        return new BrokerResponseNative(exceptions);
-      }
-
-      // Set the maximum serialized response size per server, and ask server to directly return final response when only
-      // one server is queried
-      int numServers = 0;
-      if (offlineRoutingTable != null) {
-        numServers += offlineRoutingTable.size();
-      }
-      if (realtimeRoutingTable != null) {
-        numServers += realtimeRoutingTable.size();
-      }
-      if (offlineBrokerRequest != null) {
-        Map<String, String> queryOptions = offlineBrokerRequest.getPinotQuery().getQueryOptions();
-        setMaxServerResponseSizeBytes(numServers, queryOptions, offlineTableConfig);
-        // Set the query option to directly return final result for single server query unless it is explicitly disabled
-        if (numServers == 1) {
-          // Set the same flag in the original server request to be used in the reduce phase for hybrid table
-          if (queryOptions.putIfAbsent(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true") == null
-              && offlineBrokerRequest != serverBrokerRequest) {
-            serverBrokerRequest.getPinotQuery().getQueryOptions()
-                .put(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true");
-          }
-        }
-      }
-      if (realtimeBrokerRequest != null) {
-        Map<String, String> queryOptions = realtimeBrokerRequest.getPinotQuery().getQueryOptions();
-        setMaxServerResponseSizeBytes(numServers, queryOptions, realtimeTableConfig);
-        // Set the query option to directly return final result for single server query unless it is explicitly disabled
-        if (numServers == 1) {
-          // Set the same flag in the original server request to be used in the reduce phase for hybrid table
-          if (queryOptions.putIfAbsent(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true") == null
-              && realtimeBrokerRequest != serverBrokerRequest) {
-            serverBrokerRequest.getPinotQuery().getQueryOptions()
-                .put(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true");
-          }
-        }
-      }
-
-      // Execute the query
-      // TODO: Replace ServerStats with ServerRoutingStatsEntry.
-      ServerStats serverStats = new ServerStats();
-      // TODO: Handle broker specific operations for explain plan queries such as:
-      //       - Alias handling
-      //       - Compile time function invocation
-      //       - Literal only queries
-      //       - Any rewrites
-      if (pinotQuery.isExplain()) {
-        // Update routing tables to only send request to offline servers for OFFLINE and HYBRID tables.
-        // TODO: Assess if the Explain Plan Query should also be routed to REALTIME servers for HYBRID tables
-        if (offlineRoutingTable != null) {
-          // For OFFLINE and HYBRID tables, don't send EXPLAIN query to realtime servers.
-          realtimeBrokerRequest = null;
-          realtimeRoutingTable = null;
-        }
-      }
-      BrokerResponseNative brokerResponse;
-      if (_queriesById != null) {
-        // Start to track the running query for cancellation just before sending it out to servers to avoid any
-        // potential failures that could happen before sending it out, like failures to calculate the routing table etc.
-        // TODO: Even tracking the query as late as here, a potential race condition between calling cancel API and
-        //       query being sent out to servers can still happen. If cancel request arrives earlier than query being
-        //       sent out to servers, the servers miss the cancel request and continue to run the queries. The users
-        //       can always list the running queries and cancel query again until it ends. Just that such race
-        //       condition makes cancel API less reliable. This should be rare as it assumes sending queries out to
-        //       servers takes time, but will address later if needed.
-        _queriesById.put(requestId, new QueryServers(query, offlineRoutingTable, realtimeRoutingTable));
-        LOGGER.debug("Keep track of running query: {}", requestId);
-        try {
-          brokerResponse = processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, offlineBrokerRequest,
-              offlineRoutingTable, realtimeBrokerRequest, realtimeRoutingTable, remainingTimeMs, serverStats,
-              requestContext);
-        } finally {
-          _queriesById.remove(requestId);
-          LOGGER.debug("Remove track of running query: {}", requestId);
-        }
-      } else {
-        brokerResponse = processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, offlineBrokerRequest,
-            offlineRoutingTable, realtimeBrokerRequest, realtimeRoutingTable, remainingTimeMs, serverStats,
-            requestContext);
-      }
-
-      for (ProcessingException exception : exceptions) {
-        brokerResponse.addException(exception);
-      }
-      brokerResponse.setNumSegmentsPrunedByBroker(numPrunedSegmentsTotal);
-      long executionEndTimeNs = System.nanoTime();
-      _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_EXECUTION,
-          executionEndTimeNs - routingEndTimeNs);
-
-      // Track number of queries with number of groups limit reached
-      if (brokerResponse.isNumGroupsLimitReached()) {
-        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.BROKER_RESPONSES_WITH_NUM_GROUPS_LIMIT_REACHED,
-            1);
-      }
-
-      // server returns STRING as default dataType for all columns in (some) scenarios where no rows are returned
-      // this is an attempt to return more faithful information based on other sources
-      ParserUtils.fillEmptyResponseSchema(brokerResponse, _tableCache, schema, database, query);
-
-      // Set total query processing time
-      long totalTimeMs = System.currentTimeMillis() - requestContext.getRequestArrivalTimeMillis();
-      brokerResponse.setTimeUsedMs(totalTimeMs);
-      augmentStatistics(requestContext, brokerResponse);
-      if (QueryOptionsUtils.shouldDropResults(pinotQuery.getQueryOptions())) {
-        brokerResponse.setResultTable(null);
-      }
-      _brokerMetrics.addTimedTableValue(rawTableName, BrokerTimer.QUERY_TOTAL_TIME_MS, totalTimeMs,
-          TimeUnit.MILLISECONDS);
-
-      // Log query and stats
-      _queryLogger.log(
-          new QueryLogger.QueryLogParams(requestContext, tableName, brokerResponse, requesterIdentity, serverStats));
-
-      return brokerResponse;
+      return doHandleRequest(requestId, query, sqlNodeAndOptions, request, requesterIdentity, requestContext,
+          httpHeaders, accessControl);
     } finally {
       Tracing.ThreadAccountantOps.clear();
     }
+  }
+
+  private BrokerResponseNative doHandleRequest(long requestId, String query,
+      SqlNodeAndOptions sqlNodeAndOptions, JsonNode request, RequesterIdentity requesterIdentity,
+      RequestContext requestContext, HttpHeaders httpHeaders, AccessControl accessControl)
+      throws Exception {
+    // Compile the request into PinotQuery
+    long compilationStartTimeNs = System.nanoTime();
+    PinotQuery pinotQuery;
+    try {
+      pinotQuery = CalciteSqlParser.compileToPinotQuery(sqlNodeAndOptions);
+    } catch (Exception e) {
+      LOGGER.info("Caught exception while compiling SQL request {}: {}, {}", requestId, query, e.getMessage());
+      _brokerMetrics.addMeteredGlobalValue(BrokerMeter.REQUEST_COMPILATION_EXCEPTIONS, 1);
+      requestContext.setErrorCode(QueryException.SQL_PARSING_ERROR_CODE);
+      // Check if the query is a v2 supported query
+      String database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
+      if (ParserUtils.canCompileWithMultiStageEngine(query, database, _tableCache)) {
+        return new BrokerResponseNative(QueryException.getException(QueryException.SQL_PARSING_ERROR, new Exception(
+            "It seems that the query is only supported by the multi-stage query engine, please retry the query using "
+                + "the multi-stage query engine "
+                + "(https://docs.pinot.apache.org/developers/advanced/v2-multi-stage-query-engine)")));
+      } else {
+        return new BrokerResponseNative(QueryException.getException(QueryException.SQL_PARSING_ERROR, e));
+      }
+    }
+
+    if (isLiteralOnlyQuery(pinotQuery)) {
+      LOGGER.debug("Request {} contains only Literal, skipping server query: {}", requestId, query);
+      try {
+        if (pinotQuery.isExplain()) {
+          // EXPLAIN PLAN results to show that query is evaluated exclusively by Broker.
+          return BrokerResponseNative.BROKER_ONLY_EXPLAIN_PLAN_OUTPUT;
+        }
+        return processLiteralOnlyQuery(requestId, pinotQuery, requestContext);
+      } catch (Exception e) {
+        // TODO: refine the exceptions here to early termination the queries won't requires to send to servers.
+        LOGGER.warn("Unable to execute literal request {}: {} at broker, fallback to server query. {}", requestId,
+            query, e.getMessage());
+      }
+    }
+
+    PinotQuery serverPinotQuery = GapfillUtils.stripGapfill(pinotQuery);
+    DataSource dataSource = serverPinotQuery.getDataSource();
+    if (dataSource == null) {
+      LOGGER.info("Data source (FROM clause) not found in request {}: {}", requestId, query);
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      return new BrokerResponseNative(
+          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Data source (FROM clause) not found"));
+    }
+    if (dataSource.getJoin() != null) {
+      LOGGER.info("JOIN is not supported in request {}: {}", requestId, query);
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      return new BrokerResponseNative(
+          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "JOIN is not supported"));
+    }
+    if (dataSource.getTableName() == null) {
+      LOGGER.info("Table name not found in request {}: {}", requestId, query);
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      return new BrokerResponseNative(
+          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Table name not found"));
+    }
+
+    try {
+      handleSubquery(serverPinotQuery, requestId, request, requesterIdentity, requestContext, httpHeaders,
+          accessControl);
+    } catch (Exception e) {
+      LOGGER.info("Caught exception while handling the subquery in request {}: {}, {}", requestId, query,
+          e.getMessage());
+      requestContext.setErrorCode(QueryException.QUERY_EXECUTION_ERROR_CODE);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
+    }
+
+    boolean ignoreCase = _tableCache.isIgnoreCase();
+    String tableName;
+    try {
+      tableName =
+          getActualTableName(DatabaseUtils.translateTableName(dataSource.getTableName(), httpHeaders, ignoreCase),
+              _tableCache);
+    } catch (DatabaseConflictException e) {
+      LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, query);
+      _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
+    }
+    dataSource.setTableName(tableName);
+    String rawTableName = TableNameBuilder.extractRawTableName(tableName);
+    requestContext.setTableName(rawTableName);
+
+    try {
+      Map<String, String> columnNameMap = _tableCache.getColumnNameMap(rawTableName);
+      if (columnNameMap != null) {
+        updateColumnNames(rawTableName, serverPinotQuery, ignoreCase, columnNameMap);
+      }
+    } catch (Exception e) {
+      // Throw exceptions with column in-existence error.
+      if (e instanceof BadQueryRequestException) {
+        LOGGER.info("Caught exception while checking column names in request {}: {}, {}", requestId, query,
+            e.getMessage());
+        requestContext.setErrorCode(QueryException.UNKNOWN_COLUMN_ERROR_CODE);
+        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.UNKNOWN_COLUMN_EXCEPTIONS, 1);
+        return new BrokerResponseNative(QueryException.getException(QueryException.UNKNOWN_COLUMN_ERROR, e));
+      }
+      LOGGER.warn("Caught exception while updating column names in request {}: {}, {}", requestId, query,
+          e.getMessage());
+    }
+    if (_defaultHllLog2m > 0) {
+      handleHLLLog2mOverride(serverPinotQuery, _defaultHllLog2m);
+    }
+    if (_enableQueryLimitOverride) {
+      handleQueryLimitOverride(serverPinotQuery, _queryResponseLimit);
+    }
+    handleSegmentPartitionedDistinctCountOverride(serverPinotQuery,
+        getSegmentPartitionedColumns(_tableCache, tableName));
+    if (_enableDistinctCountBitmapOverride) {
+      handleDistinctCountBitmapOverride(serverPinotQuery);
+    }
+
+    Schema schema = _tableCache.getSchema(rawTableName);
+    if (schema != null) {
+      handleDistinctMultiValuedOverride(serverPinotQuery, schema);
+    }
+
+    long compilationEndTimeNs = System.nanoTime();
+    // full request compile time = compilationTimeNs + parserTimeNs
+    _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.REQUEST_COMPILATION,
+        (compilationEndTimeNs - compilationStartTimeNs) + sqlNodeAndOptions.getParseTimeNs());
+
+    // Second-stage table-level access control
+    // TODO: Modify AccessControl interface to directly take PinotQuery
+    BrokerRequest brokerRequest = CalciteSqlCompiler.convertToBrokerRequest(pinotQuery);
+    BrokerRequest serverBrokerRequest =
+        serverPinotQuery == pinotQuery ? brokerRequest : CalciteSqlCompiler.convertToBrokerRequest(serverPinotQuery);
+    AuthorizationResult authorizationResult = accessControl.authorize(requesterIdentity, serverBrokerRequest);
+    if (authorizationResult.hasAccess()) {
+      authorizationResult = accessControl.authorize(httpHeaders, TargetType.TABLE, tableName, Actions.Table.QUERY);
+    }
+
+    _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.AUTHORIZATION,
+        System.nanoTime() - compilationEndTimeNs);
+
+    if (!authorizationResult.hasAccess()) {
+      _brokerMetrics.addMeteredTableValue(tableName, BrokerMeter.REQUEST_DROPPED_DUE_TO_ACCESS_ERROR, 1);
+      LOGGER.info("Access denied for request {}: {}, table: {}, reason :{}", requestId, query, tableName,
+          authorizationResult.getFailureMessage());
+      requestContext.setErrorCode(QueryException.ACCESS_DENIED_ERROR_CODE);
+      String failureMessage = authorizationResult.getFailureMessage();
+      if (StringUtils.isNotBlank(failureMessage)) {
+        failureMessage = "Reason: " + failureMessage;
+      }
+      throw new WebApplicationException("Permission denied." + failureMessage, Response.Status.FORBIDDEN);
+    }
+
+    // Get the tables hit by the request
+    String offlineTableName = null;
+    String realtimeTableName = null;
+    TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
+    if (tableType == TableType.OFFLINE) {
+      // Offline table
+      if (_routingManager.routingExists(tableName)) {
+        offlineTableName = tableName;
+      }
+    } else if (tableType == TableType.REALTIME) {
+      // Realtime table
+      if (_routingManager.routingExists(tableName)) {
+        realtimeTableName = tableName;
+      }
+    } else {
+      // Hybrid table (check both OFFLINE and REALTIME)
+      String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+      if (_routingManager.routingExists(offlineTableNameToCheck)) {
+        offlineTableName = offlineTableNameToCheck;
+      }
+      String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+      if (_routingManager.routingExists(realtimeTableNameToCheck)) {
+        realtimeTableName = realtimeTableNameToCheck;
+      }
+    }
+
+    TableConfig offlineTableConfig =
+        _tableCache.getTableConfig(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
+    TableConfig realtimeTableConfig =
+        _tableCache.getTableConfig(TableNameBuilder.REALTIME.tableNameWithType(rawTableName));
+
+    if (offlineTableName == null && realtimeTableName == null) {
+      // No table matches the request
+      if (realtimeTableConfig == null && offlineTableConfig == null) {
+        LOGGER.info("Table not found for request {}: {}", requestId, query);
+        requestContext.setErrorCode(QueryException.TABLE_DOES_NOT_EXIST_ERROR_CODE);
+        return BrokerResponseNative.TABLE_DOES_NOT_EXIST;
+      }
+      LOGGER.info("No table matches for request {}: {}", requestId, query);
+      requestContext.setErrorCode(QueryException.BROKER_RESOURCE_MISSING_ERROR_CODE);
+      _brokerMetrics.addMeteredGlobalValue(BrokerMeter.RESOURCE_MISSING_EXCEPTIONS, 1);
+      return BrokerResponseNative.NO_TABLE_RESULT;
+    }
+
+    // Handle query rewrite that can be overridden by the table configs
+    if (offlineTableName == null) {
+      offlineTableConfig = null;
+    }
+    if (realtimeTableName == null) {
+      realtimeTableConfig = null;
+    }
+    HandlerContext handlerContext = getHandlerContext(offlineTableConfig, realtimeTableConfig);
+    if (handlerContext._disableGroovy) {
+      rejectGroovyQuery(serverPinotQuery);
+    }
+    if (handlerContext._useApproximateFunction) {
+      handleApproximateFunctionOverride(serverPinotQuery);
+    }
+
+    // Validate QPS quota
+    String database = DatabaseUtils.extractDatabaseFromFullyQualifiedTableName(tableName);
+    if (!_queryQuotaManager.acquireDatabase(database)) {
+      String errorMessage =
+          String.format("Request %d: %s exceeds query quota for database: %s", requestId, query, database);
+      LOGGER.info(errorMessage);
+      requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
+    }
+    if (!_queryQuotaManager.acquire(tableName)) {
+      String errorMessage =
+          String.format("Request %d: %s exceeds query quota for table: %s", requestId, query, tableName);
+      LOGGER.info(errorMessage);
+      requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERY_QUOTA_EXCEEDED, 1);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
+    }
+
+    // Validate the request
+    try {
+      validateRequest(serverPinotQuery, _queryResponseLimit);
+    } catch (Exception e) {
+      LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
+      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+      return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
+    }
+
+    _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.QUERIES, 1);
+    _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERIES_GLOBAL, 1);
+    _brokerMetrics.addValueToTableGauge(rawTableName, BrokerGauge.REQUEST_SIZE, query.length());
+
+    if (!pinotQuery.isExplain() && _enableMultistageMigrationMetric) {
+      // Check if the query is a v2 supported query
+      database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
+      // Attempt to add the query to the compile queue; drop if queue is full
+      if (!_multistageCompileQueryQueue.offer(Pair.of(query, database))) {
+        LOGGER.trace("Not compiling query `{}` using the multi-stage query engine because the query queue is full",
+            query);
+      }
+    }
+
+    // Prepare OFFLINE and REALTIME requests
+    BrokerRequest offlineBrokerRequest = null;
+    BrokerRequest realtimeBrokerRequest = null;
+    TimeBoundaryInfo timeBoundaryInfo = null;
+    if (offlineTableName != null && realtimeTableName != null) {
+      // Time boundary info might be null when there is no segment in the offline table, query real-time side only
+      timeBoundaryInfo = _routingManager.getTimeBoundaryInfo(offlineTableName);
+      if (timeBoundaryInfo == null) {
+        LOGGER.debug("No time boundary info found for hybrid table: {}", rawTableName);
+        offlineTableName = null;
+      }
+    }
+    if (offlineTableName != null && realtimeTableName != null) {
+      // Hybrid
+      PinotQuery offlinePinotQuery = serverPinotQuery.deepCopy();
+      offlinePinotQuery.getDataSource().setTableName(offlineTableName);
+      attachTimeBoundary(offlinePinotQuery, timeBoundaryInfo, true);
+      handleExpressionOverride(offlinePinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
+      handleTimestampIndexOverride(offlinePinotQuery, offlineTableConfig);
+      _queryOptimizer.optimize(offlinePinotQuery, offlineTableConfig, schema);
+      offlineBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(offlinePinotQuery);
+
+      PinotQuery realtimePinotQuery = serverPinotQuery.deepCopy();
+      realtimePinotQuery.getDataSource().setTableName(realtimeTableName);
+      attachTimeBoundary(realtimePinotQuery, timeBoundaryInfo, false);
+      handleExpressionOverride(realtimePinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
+      handleTimestampIndexOverride(realtimePinotQuery, realtimeTableConfig);
+      _queryOptimizer.optimize(realtimePinotQuery, realtimeTableConfig, schema);
+      realtimeBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(realtimePinotQuery);
+
+      requestContext.setFanoutType(RequestContext.FanoutType.HYBRID);
+      requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
+      requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
+    } else if (offlineTableName != null) {
+      // OFFLINE only
+      setTableName(serverBrokerRequest, offlineTableName);
+      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
+      handleTimestampIndexOverride(serverPinotQuery, offlineTableConfig);
+      _queryOptimizer.optimize(serverPinotQuery, offlineTableConfig, schema);
+      offlineBrokerRequest = serverBrokerRequest;
+
+      requestContext.setFanoutType(RequestContext.FanoutType.OFFLINE);
+      requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
+    } else {
+      // REALTIME only
+      setTableName(serverBrokerRequest, realtimeTableName);
+      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
+      handleTimestampIndexOverride(serverPinotQuery, realtimeTableConfig);
+      _queryOptimizer.optimize(serverPinotQuery, realtimeTableConfig, schema);
+      realtimeBrokerRequest = serverBrokerRequest;
+
+      requestContext.setFanoutType(RequestContext.FanoutType.REALTIME);
+      requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
+    }
+
+    // Check if response can be sent without server query evaluation.
+    if (offlineBrokerRequest != null && isFilterAlwaysFalse(offlineBrokerRequest.getPinotQuery())) {
+      // We don't need to evaluate offline request
+      offlineBrokerRequest = null;
+    }
+    if (realtimeBrokerRequest != null && isFilterAlwaysFalse(realtimeBrokerRequest.getPinotQuery())) {
+      // We don't need to evaluate realtime request
+      realtimeBrokerRequest = null;
+    }
+
+    if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
+      return getEmptyBrokerOnlyResponse(pinotQuery, requestContext, tableName, requesterIdentity);
+    }
+
+    if (offlineBrokerRequest != null && isFilterAlwaysTrue(offlineBrokerRequest.getPinotQuery())) {
+      // Drop offline request filter since it is always true
+      offlineBrokerRequest.getPinotQuery().setFilterExpression(null);
+    }
+    if (realtimeBrokerRequest != null && isFilterAlwaysTrue(realtimeBrokerRequest.getPinotQuery())) {
+      // Drop realtime request filter since it is always true
+      realtimeBrokerRequest.getPinotQuery().setFilterExpression(null);
+    }
+
+    // Calculate routing table for the query
+    // TODO: Modify RoutingManager interface to directly take PinotQuery
+    long routingStartTimeNs = System.nanoTime();
+    Map<ServerInstance, Pair<List<String>, List<String>>> offlineRoutingTable = null;
+    Map<ServerInstance, Pair<List<String>, List<String>>> realtimeRoutingTable = null;
+    List<String> unavailableSegments = new ArrayList<>();
+    int numPrunedSegmentsTotal = 0;
+    if (offlineBrokerRequest != null) {
+      // NOTE: Routing table might be null if table is just removed
+      RoutingTable routingTable = _routingManager.getRoutingTable(offlineBrokerRequest, requestId);
+      if (routingTable != null) {
+        unavailableSegments.addAll(routingTable.getUnavailableSegments());
+        Map<ServerInstance, Pair<List<String>, List<String>>> serverInstanceToSegmentsMap =
+            routingTable.getServerInstanceToSegmentsMap();
+        if (!serverInstanceToSegmentsMap.isEmpty()) {
+          offlineRoutingTable = serverInstanceToSegmentsMap;
+        } else {
+          offlineBrokerRequest = null;
+        }
+        numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
+      } else {
+        offlineBrokerRequest = null;
+      }
+    }
+    if (realtimeBrokerRequest != null) {
+      // NOTE: Routing table might be null if table is just removed
+      RoutingTable routingTable = _routingManager.getRoutingTable(realtimeBrokerRequest, requestId);
+      if (routingTable != null) {
+        unavailableSegments.addAll(routingTable.getUnavailableSegments());
+        Map<ServerInstance, Pair<List<String>, List<String>>> serverInstanceToSegmentsMap =
+            routingTable.getServerInstanceToSegmentsMap();
+        if (!serverInstanceToSegmentsMap.isEmpty()) {
+          realtimeRoutingTable = serverInstanceToSegmentsMap;
+        } else {
+          realtimeBrokerRequest = null;
+        }
+        numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
+      } else {
+        realtimeBrokerRequest = null;
+      }
+    }
+    int numUnavailableSegments = unavailableSegments.size();
+    requestContext.setNumUnavailableSegments(numUnavailableSegments);
+
+    List<ProcessingException> exceptions = new ArrayList<>();
+    if (numUnavailableSegments > 0) {
+      String errorMessage;
+      if (numUnavailableSegments > MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION) {
+        errorMessage = String.format("%d segments unavailable, sampling %d: %s", numUnavailableSegments,
+            MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION,
+            unavailableSegments.subList(0, MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION));
+      } else {
+        errorMessage = String.format("%d segments unavailable: %s", numUnavailableSegments, unavailableSegments);
+      }
+      String realtimeRoutingPolicy = realtimeBrokerRequest != null ? getRoutingPolicy(realtimeTableConfig) : null;
+      String offlineRoutingPolicy = offlineBrokerRequest != null ? getRoutingPolicy(offlineTableConfig) : null;
+      errorMessage = addRoutingPolicyInErrMsg(errorMessage, realtimeRoutingPolicy, offlineRoutingPolicy);
+      exceptions.add(QueryException.getException(QueryException.BROKER_SEGMENT_UNAVAILABLE_ERROR, errorMessage));
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.BROKER_RESPONSES_WITH_UNAVAILABLE_SEGMENTS, 1);
+    }
+
+    if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
+      if (!exceptions.isEmpty()) {
+        LOGGER.info("No server found for request {}: {}", requestId, query);
+        _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.NO_SERVER_FOUND_EXCEPTIONS, 1);
+        return new BrokerResponseNative(exceptions);
+      } else {
+        // When all segments have been pruned, we can just return an empty response.
+        return getEmptyBrokerOnlyResponse(pinotQuery, requestContext, tableName, requesterIdentity);
+      }
+    }
+    long routingEndTimeNs = System.nanoTime();
+    _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_ROUTING,
+        routingEndTimeNs - routingStartTimeNs);
+
+    // Set timeout in the requests
+    long timeSpentMs = TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
+    // Remaining time in milliseconds for the server query execution
+    // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
+    //       configured, but if necessary, we also allow different timeout for them.
+    //       If the timeout is not the same for offline table and real-time table, use the max of offline table
+    //       remaining time and realtime table remaining time. Server side will have different remaining time set for
+    //       each table type, and broker should wait for both types to return.
+    long remainingTimeMs = 0;
+    try {
+      if (offlineBrokerRequest != null) {
+        remainingTimeMs =
+            setQueryTimeout(offlineTableName, offlineBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs);
+      }
+      if (realtimeBrokerRequest != null) {
+        remainingTimeMs = Math.max(remainingTimeMs,
+            setQueryTimeout(realtimeTableName, realtimeBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs));
+      }
+    } catch (TimeoutException e) {
+      String errorMessage = e.getMessage();
+      LOGGER.info("{} {}: {}", errorMessage, requestId, query);
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_TIMEOUT_BEFORE_SCATTERED_EXCEPTIONS, 1);
+      exceptions.add(QueryException.getException(QueryException.BROKER_TIMEOUT_ERROR, errorMessage));
+      return new BrokerResponseNative(exceptions);
+    }
+
+    // Set the maximum serialized response size per server, and ask server to directly return final response when only
+    // one server is queried
+    int numServers = 0;
+    if (offlineRoutingTable != null) {
+      numServers += offlineRoutingTable.size();
+    }
+    if (realtimeRoutingTable != null) {
+      numServers += realtimeRoutingTable.size();
+    }
+    if (offlineBrokerRequest != null) {
+      Map<String, String> queryOptions = offlineBrokerRequest.getPinotQuery().getQueryOptions();
+      setMaxServerResponseSizeBytes(numServers, queryOptions, offlineTableConfig);
+      // Set the query option to directly return final result for single server query unless it is explicitly disabled
+      if (numServers == 1) {
+        // Set the same flag in the original server request to be used in the reduce phase for hybrid table
+        if (queryOptions.putIfAbsent(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true") == null
+            && offlineBrokerRequest != serverBrokerRequest) {
+          serverBrokerRequest.getPinotQuery().getQueryOptions()
+              .put(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true");
+        }
+      }
+    }
+    if (realtimeBrokerRequest != null) {
+      Map<String, String> queryOptions = realtimeBrokerRequest.getPinotQuery().getQueryOptions();
+      setMaxServerResponseSizeBytes(numServers, queryOptions, realtimeTableConfig);
+      // Set the query option to directly return final result for single server query unless it is explicitly disabled
+      if (numServers == 1) {
+        // Set the same flag in the original server request to be used in the reduce phase for hybrid table
+        if (queryOptions.putIfAbsent(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true") == null
+            && realtimeBrokerRequest != serverBrokerRequest) {
+          serverBrokerRequest.getPinotQuery().getQueryOptions()
+              .put(QueryOptionKey.SERVER_RETURN_FINAL_RESULT, "true");
+        }
+      }
+    }
+
+    // Execute the query
+    // TODO: Replace ServerStats with ServerRoutingStatsEntry.
+    ServerStats serverStats = new ServerStats();
+    // TODO: Handle broker specific operations for explain plan queries such as:
+    //       - Alias handling
+    //       - Compile time function invocation
+    //       - Literal only queries
+    //       - Any rewrites
+    if (pinotQuery.isExplain()) {
+      // Update routing tables to only send request to offline servers for OFFLINE and HYBRID tables.
+      // TODO: Assess if the Explain Plan Query should also be routed to REALTIME servers for HYBRID tables
+      if (offlineRoutingTable != null) {
+        // For OFFLINE and HYBRID tables, don't send EXPLAIN query to realtime servers.
+        realtimeBrokerRequest = null;
+        realtimeRoutingTable = null;
+      }
+    }
+    BrokerResponseNative brokerResponse;
+    if (_queriesById != null) {
+      // Start to track the running query for cancellation just before sending it out to servers to avoid any
+      // potential failures that could happen before sending it out, like failures to calculate the routing table etc.
+      // TODO: Even tracking the query as late as here, a potential race condition between calling cancel API and
+      //       query being sent out to servers can still happen. If cancel request arrives earlier than query being
+      //       sent out to servers, the servers miss the cancel request and continue to run the queries. The users
+      //       can always list the running queries and cancel query again until it ends. Just that such race
+      //       condition makes cancel API less reliable. This should be rare as it assumes sending queries out to
+      //       servers takes time, but will address later if needed.
+      _queriesById.put(requestId, new QueryServers(query, offlineRoutingTable, realtimeRoutingTable));
+      LOGGER.debug("Keep track of running query: {}", requestId);
+      try {
+        brokerResponse = processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, offlineBrokerRequest,
+            offlineRoutingTable, realtimeBrokerRequest, realtimeRoutingTable, remainingTimeMs, serverStats,
+            requestContext);
+      } finally {
+        _queriesById.remove(requestId);
+        LOGGER.debug("Remove track of running query: {}", requestId);
+      }
+    } else {
+      brokerResponse = processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, offlineBrokerRequest,
+          offlineRoutingTable, realtimeBrokerRequest, realtimeRoutingTable, remainingTimeMs, serverStats,
+          requestContext);
+    }
+
+    for (ProcessingException exception : exceptions) {
+      brokerResponse.addException(exception);
+    }
+    brokerResponse.setNumSegmentsPrunedByBroker(numPrunedSegmentsTotal);
+    long executionEndTimeNs = System.nanoTime();
+    _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_EXECUTION,
+        executionEndTimeNs - routingEndTimeNs);
+
+    // Track number of queries with number of groups limit reached
+    if (brokerResponse.isNumGroupsLimitReached()) {
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.BROKER_RESPONSES_WITH_NUM_GROUPS_LIMIT_REACHED,
+          1);
+    }
+
+    // server returns STRING as default dataType for all columns in (some) scenarios where no rows are returned
+    // this is an attempt to return more faithful information based on other sources
+    ParserUtils.fillEmptyResponseSchema(brokerResponse, _tableCache, schema, database, query);
+
+    // Set total query processing time
+    long totalTimeMs = System.currentTimeMillis() - requestContext.getRequestArrivalTimeMillis();
+    brokerResponse.setTimeUsedMs(totalTimeMs);
+    augmentStatistics(requestContext, brokerResponse);
+    if (QueryOptionsUtils.shouldDropResults(pinotQuery.getQueryOptions())) {
+      brokerResponse.setResultTable(null);
+    }
+    _brokerMetrics.addTimedTableValue(rawTableName, BrokerTimer.QUERY_TOTAL_TIME_MS, totalTimeMs,
+        TimeUnit.MILLISECONDS);
+
+    // Log query and stats
+    _queryLogger.log(
+        new QueryLogger.QueryLogParams(requestContext, tableName, brokerResponse, requesterIdentity, serverStats));
+
+    return brokerResponse;
   }
 
   @VisibleForTesting
@@ -997,7 +1005,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       }
 
       BrokerResponse response =
-          handleRequest(requestId, subquery, sqlNodeAndOptions, jsonRequest, requesterIdentity, requestContext,
+          doHandleRequest(requestId, subquery, sqlNodeAndOptions, jsonRequest, requesterIdentity, requestContext,
               httpHeaders, accessControl);
       if (response.getExceptionsSize() != 0) {
         throw new RuntimeException("Caught exception while executing subquery: " + subquery);
