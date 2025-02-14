@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.common.function.scalar.arithmetic;
 
+import java.math.BigDecimal;
 import java.util.EnumMap;
 import java.util.Map;
 import org.apache.pinot.common.function.FunctionInfo;
@@ -37,6 +38,9 @@ public class MultScalarFunction extends PolymorphicBinaryArithmeticScalarFunctio
               MultScalarFunction.class, false));
       TYPE_FUNCTION_INFO_MAP.put(ColumnDataType.DOUBLE,
           new FunctionInfo(MultScalarFunction.class.getMethod("doubleMult", double.class, double.class),
+              MultScalarFunction.class, false));
+      TYPE_FUNCTION_INFO_MAP.put(ColumnDataType.BIG_DECIMAL,
+          new FunctionInfo(MultScalarFunction.class.getMethod("bigDecimalMult", BigDecimal.class, BigDecimal.class),
               MultScalarFunction.class, false));
     } catch (NoSuchMethodException e) {
       throw new RuntimeException(e);
@@ -62,5 +66,9 @@ public class MultScalarFunction extends PolymorphicBinaryArithmeticScalarFunctio
 
   public static double doubleMult(double a, double b) {
     return a * b;
+  }
+
+  public static BigDecimal bigDecimalMult(BigDecimal a, BigDecimal b) {
+    return a.multiply(b);
   }
 }

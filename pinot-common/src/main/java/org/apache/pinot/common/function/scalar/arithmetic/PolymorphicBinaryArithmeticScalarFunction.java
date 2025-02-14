@@ -56,6 +56,10 @@ public abstract class PolymorphicBinaryArithmeticScalarFunction implements Pinot
       return functionInfoForType(ColumnDataType.LONG);
     }
 
+    if (argumentType1 == ColumnDataType.BIG_DECIMAL && argumentType2 == ColumnDataType.BIG_DECIMAL) {
+      return functionInfoForType(ColumnDataType.BIG_DECIMAL);
+    }
+
     // Fall back to double based comparison by default
     return functionInfoForType(ColumnDataType.DOUBLE);
   }

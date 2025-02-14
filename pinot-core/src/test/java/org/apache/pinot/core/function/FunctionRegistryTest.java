@@ -19,12 +19,15 @@
 package org.apache.pinot.core.function;
 
 import java.util.EnumSet;
+import org.apache.pinot.common.function.FunctionInfo;
 import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.common.function.TransformFunctionType;
+import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.spi.annotations.ScalarFunction;
 import org.apache.pinot.sql.FilterKind;
 import org.testng.annotations.Test;
 
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
@@ -88,5 +91,53 @@ public class FunctionRegistryTest {
     assertNull(FunctionRegistry.lookupFunctionInfo("testscalarfunction", 2));
     assertNull(FunctionRegistry.lookupFunctionInfo("testfunc1", 1));
     assertNull(FunctionRegistry.lookupFunctionInfo("testfunc2", 1));
+  }
+
+  @Test
+  public void testPolymorphicBinaryArithmeticFunctions() throws Exception {
+    // ADD
+    FunctionInfo functionInfo = FunctionRegistry.lookupFunctionInfo("add",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 1, 2L), 3L);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("add",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 1.0, 2L), 3.0);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("add",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.BIG_DECIMAL, DataSchema.ColumnDataType.BIG_DECIMAL});
+    assertEquals(
+        functionInfo.getMethod().invoke(null, new java.math.BigDecimal("1.0"), new java.math.BigDecimal("2.0")),
+        new java.math.BigDecimal("3.0"));
+
+    // SUB
+    functionInfo = FunctionRegistry.lookupFunctionInfo("sub",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 2, 1L), 1L);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("sub",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 2.0, 1L), 1.0);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("sub",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.BIG_DECIMAL, DataSchema.ColumnDataType.BIG_DECIMAL});
+    assertEquals(
+        functionInfo.getMethod().invoke(null, new java.math.BigDecimal("2.0"), new java.math.BigDecimal("1.0")),
+        new java.math.BigDecimal("1.0"));
+
+    // MULT
+    functionInfo = FunctionRegistry.lookupFunctionInfo("mult",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.INT, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 2, 1L), 2L);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("mult",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.LONG});
+    assertEquals(functionInfo.getMethod().invoke(null, 2.0, 1L), 2.0);
+
+    functionInfo = FunctionRegistry.lookupFunctionInfo("mult",
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.BIG_DECIMAL, DataSchema.ColumnDataType.BIG_DECIMAL});
+    assertEquals(
+        functionInfo.getMethod().invoke(null, new java.math.BigDecimal("2.0"), new java.math.BigDecimal("1.0")),
+        new java.math.BigDecimal("2.00"));
   }
 }
