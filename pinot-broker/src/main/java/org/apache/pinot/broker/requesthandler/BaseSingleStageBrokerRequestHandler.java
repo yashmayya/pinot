@@ -820,7 +820,13 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     // server returns STRING as default dataType for all columns in (some) scenarios where no rows are returned
     // this is an attempt to return more faithful information based on other sources
-    ParserUtils.fillEmptyResponseSchema(brokerResponse, _tableCache, schema, database, query);
+    // DISABLED until we face this issue:
+    // https://github.com/apache/pinot/issues/15064
+    /*
+    if (brokerResponse.getNumRowsResultSet() == 0) {
+      ParserUtils.fillEmptyResponseSchema(brokerResponse, _tableCache, schema, database, query);
+    }
+    */
 
     // Set total query processing time
     long totalTimeMs = System.currentTimeMillis() - requestContext.getRequestArrivalTimeMillis();
@@ -873,6 +879,9 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     // Send empty response since we don't need to evaluate either offline or realtime request.
     BrokerResponseNative brokerResponse = BrokerResponseNative.empty();
+    // DISABLED until we face this issue:
+    // https://github.com/apache/pinot/issues/15064
+    //ParserUtils.fillEmptyResponseSchema(brokerResponse, _tableCache, schema, database, query);
     brokerResponse.setTimeUsedMs(System.currentTimeMillis() - requestContext.getRequestArrivalTimeMillis());
     _queryLogger.log(
         new QueryLogger.QueryLogParams(requestContext, tableName, brokerResponse, requesterIdentity, null));
