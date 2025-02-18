@@ -280,6 +280,9 @@ public class QueryDispatcher {
           dispatchCallbacks.poll(deadline.timeRemaining(TimeUnit.MILLISECONDS), TimeUnit.MILLISECONDS);
       if (resp != null) {
         if (resp.getThrowable() != null) {
+          if (_failureDetector != null) {
+            _failureDetector.markServerUnhealthy(resp.getServerInstance().getInstanceId());
+          }
           throw new RuntimeException(
               String.format("Error dispatching query: %d to server: %s", requestId, resp.getServerInstance()),
               resp.getThrowable());
