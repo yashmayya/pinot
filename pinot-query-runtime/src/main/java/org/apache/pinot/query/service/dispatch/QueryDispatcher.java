@@ -280,7 +280,8 @@ public class QueryDispatcher {
           dispatchCallbacks.poll(deadline.timeRemaining(TimeUnit.MILLISECONDS), TimeUnit.MILLISECONDS);
       if (resp != null) {
         if (resp.getThrowable() != null) {
-          if (_failureDetector != null) {
+          if (getOrCreateDispatchClient(resp.getServerInstance()).getChannel().getState(false)
+              != ConnectivityState.READY && _failureDetector != null) {
             _failureDetector.markServerUnhealthy(resp.getServerInstance().getInstanceId());
           }
           throw new RuntimeException(
