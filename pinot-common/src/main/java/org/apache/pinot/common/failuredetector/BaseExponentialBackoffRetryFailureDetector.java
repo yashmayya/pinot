@@ -148,6 +148,7 @@ public abstract class BaseExponentialBackoffRetryFailureDetector implements Fail
 
   @Override
   public void markServerUnhealthy(String instanceId) {
+    LOGGER.warn("Server: {} is unhealthy", instanceId);
     _unhealthyServerRetryInfoMap.computeIfAbsent(instanceId, id -> {
       LOGGER.warn("Mark server: {} as unhealthy", instanceId);
       _brokerMetrics.setValueOfGlobalGauge(BrokerGauge.UNHEALTHY_SERVERS, _unhealthyServerRetryInfoMap.size() + 1);
