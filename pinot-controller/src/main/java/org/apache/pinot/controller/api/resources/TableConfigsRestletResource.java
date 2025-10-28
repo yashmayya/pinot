@@ -76,6 +76,7 @@ import org.apache.pinot.segment.local.utils.SchemaUtils;
 import org.apache.pinot.segment.local.utils.TableConfigUtils;
 import org.apache.pinot.spi.config.TableConfigs;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableConfigFactory;
 import org.apache.pinot.spi.data.LogicalTableConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -202,8 +203,7 @@ public class TableConfigsRestletResource {
       throws Exception {
     Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     try {
-      tableConfigsAndUnrecognizedProps =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigsAndUnrecognizedProps = TableConfigFactory.tableConfigsAndUnrecognizedProperties(tableConfigsStr);
     } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER, String.format("Invalid TableConfigs. %s", e.getMessage()),
           Response.Status.BAD_REQUEST, e);
@@ -374,8 +374,7 @@ public class TableConfigsRestletResource {
     Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     TableConfigs tableConfigs;
     try {
-      tableConfigsAndUnrecognizedProps =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigsAndUnrecognizedProps = TableConfigFactory.tableConfigsAndUnrecognizedProperties(tableConfigsStr);
       tableConfigs = tableConfigsAndUnrecognizedProps.getLeft();
       validateConfig(tableConfigs, databaseName, typesToSkip);
       Preconditions.checkState(
@@ -452,8 +451,7 @@ public class TableConfigsRestletResource {
       @Context Request request) {
     Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     try {
-      tableConfigsAndUnrecognizedProps =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigsAndUnrecognizedProps = TableConfigFactory.tableConfigsAndUnrecognizedProperties(tableConfigsStr);
     } catch (IOException e) {
       throw new ControllerApplicationException(LOGGER,
           String.format("Invalid TableConfigs json string: %s. Reason: %s", tableConfigsStr, e.getMessage()),

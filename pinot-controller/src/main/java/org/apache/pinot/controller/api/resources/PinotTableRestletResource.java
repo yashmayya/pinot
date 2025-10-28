@@ -115,6 +115,7 @@ import org.apache.pinot.core.auth.ManualAuthorization;
 import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.segment.local.utils.TableConfigUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableConfigFactory;
 import org.apache.pinot.spi.config.table.TableStatsHumanReadable;
 import org.apache.pinot.spi.config.table.TableStatus;
 import org.apache.pinot.spi.config.table.TableType;
@@ -213,13 +214,12 @@ public class PinotTableRestletResource {
       @Context HttpHeaders httpHeaders, @Context Request request)
       throws IOException {
     // TODO introduce a table config ctor with json string.
-    Pair<TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
+    Pair<? extends TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
     TableConfig tableConfig;
     String tableNameWithType;
     Schema schema;
     try {
-      tableConfigAndUnrecognizedProperties =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigStr, TableConfig.class);
+      tableConfigAndUnrecognizedProperties = TableConfigFactory.tableConfigAndUnrecognizedProperties(tableConfigStr);
       tableConfig = tableConfigAndUnrecognizedProperties.getLeft();
       tableNameWithType = DatabaseUtils.translateTableName(tableConfig.getTableName(), httpHeaders);
       tableConfig.setTableName(tableNameWithType);
@@ -597,13 +597,12 @@ public class PinotTableRestletResource {
       @QueryParam("validationTypesToSkip") @Nullable String typesToSkip, @Context HttpHeaders headers,
       String tableConfigString)
       throws Exception {
-    Pair<TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
+    Pair<? extends TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
     TableConfig tableConfig;
     String tableNameWithType;
     Schema schema;
     try {
-      tableConfigAndUnrecognizedProperties =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigString, TableConfig.class);
+      tableConfigAndUnrecognizedProperties = TableConfigFactory.tableConfigAndUnrecognizedProperties(tableConfigString);
       tableConfig = tableConfigAndUnrecognizedProperties.getLeft();
       tableNameWithType = DatabaseUtils.translateTableName(tableConfig.getTableName(), headers);
       tableConfig.setTableName(tableNameWithType);
@@ -663,10 +662,9 @@ public class PinotTableRestletResource {
       @ApiParam(value = "comma separated list of validation type(s) to skip. supported types: (ALL|TASK|UPSERT)")
       @QueryParam("validationTypesToSkip") @Nullable String typesToSkip, @Context HttpHeaders httpHeaders,
       @Context Request request) {
-    Pair<TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
+    Pair<? extends TableConfig, Map<String, Object>> tableConfigAndUnrecognizedProperties;
     try {
-      tableConfigAndUnrecognizedProperties =
-          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigStr, TableConfig.class);
+      tableConfigAndUnrecognizedProperties = TableConfigFactory.tableConfigAndUnrecognizedProperties(tableConfigStr);
     } catch (IOException e) {
       String msg = String.format("Invalid table config json string: %s. Reason: %s", tableConfigStr, e.getMessage());
       throw new ControllerApplicationException(LOGGER, msg, Response.Status.BAD_REQUEST, e);

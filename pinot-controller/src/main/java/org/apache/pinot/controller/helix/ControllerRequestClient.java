@@ -35,6 +35,7 @@ import org.apache.pinot.common.utils.SimpleHttpResponse;
 import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.controller.api.resources.PauseStatusDetails;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableConfigFactory;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.tenant.Tenant;
 import org.apache.pinot.spi.config.tenant.TenantRole;
@@ -216,7 +217,7 @@ public class ControllerRequestClient {
       SimpleHttpResponse response = HttpClient.wrapAndThrowHttpException(
           _httpClient.sendGetRequest(new URI(_controllerRequestURLBuilder.forTableGet(tableName)), _headers));
       return JsonUtils.jsonNodeToObject(JsonUtils.stringToJsonNode(response.getResponse()).get(tableType.toString()),
-          TableConfig.class);
+          TableConfigFactory.getTableConfigClass());
     } catch (HttpErrorStatusException | URISyntaxException e) {
       throw new IOException(e);
     }

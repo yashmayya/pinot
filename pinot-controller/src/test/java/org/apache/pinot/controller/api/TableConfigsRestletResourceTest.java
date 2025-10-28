@@ -31,6 +31,7 @@ import org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConfigUtils;
 import org.apache.pinot.spi.config.TableConfigs;
 import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableConfigFactory;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.TunerConfig;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
@@ -330,7 +331,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     TableConfigs tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, realtimeTableConfig);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    TableConfigs tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
     Assert.assertEquals(tableConfigsResponse.getRealtime().getTableName(), realtimeTableConfig.getTableName());
@@ -356,7 +357,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
         replicaTestRealtimeTableConfig);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getReplication(),
         DEFAULT_MIN_NUM_REPLICAS);
@@ -371,7 +372,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     tableConfigs = new TableConfigs(tableName, dimSchema, offlineDimTableConfig, null);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableName, tableConfigsResponse.getTableName());
     Assert.assertEquals(tableConfigsResponse.getOffline().getQuotaConfig().getStorage(),
         DEFAULT_INSTANCE.getControllerConfig().getDimTableMaxSize());
@@ -385,7 +386,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
         new TableConfigs(tableName, createDummySchema(tableName), offlineTunerTableConfig, realtimeTunerTableConfig);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableName, tableConfigsResponse.getTableName());
     Assert.assertTrue(tableConfigsResponse.getOffline().getIndexingConfig().getInvertedIndexColumns()
         .containsAll(schema.getDimensionNames()));
@@ -475,7 +476,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     }
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    TableConfigs tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
     Assert.assertNull(tableConfigs.getRealtime());
@@ -494,7 +495,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     sendPutRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsUpdate(tableName),
         tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
     Assert.assertEquals(tableConfigsResponse.getRealtime().getTableName(), realtimeTableConfig.getTableName());
@@ -514,7 +515,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     sendPutRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsUpdate(tableName),
         tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
     Assert.assertEquals(tableConfigsResponse.getRealtime().getTableName(), realtimeTableConfig.getTableName());
@@ -528,7 +529,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     sendPutRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsUpdate(tableName),
         tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertTrue(tableConfigsResponse.getOffline().getIndexingConfig().getInvertedIndexColumns().contains("dimA"));
     Assert.assertTrue(
         tableConfigsResponse.getRealtime().getIndexingConfig().getInvertedIndexColumns().contains("dimA"));
@@ -546,7 +547,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
 
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    TableConfigs tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertNotNull(tableConfigs.getOffline());
 
     // Remove field from schema and try to update schema without the 'forceTableSchemaUpdate' option
@@ -586,7 +587,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     TableConfigs tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, null);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    TableConfigs tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
 
     // delete & check
@@ -603,7 +604,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, realtimeTableConfig);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
     response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
 
     // delete & check
@@ -680,7 +681,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     Schema schema = createDummySchema(tableName);
     TableConfigs tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, null);
     ObjectNode tableConfigsJson = JsonUtils.objectToJsonNode(tableConfigs).deepCopy();
-    tableConfigsJson.put("illegalKey1", 1);
+    ((ObjectNode) tableConfigsJson.get("offline")).put("illegalKey1", 1);
 
     // Validate
     DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsValidate();
@@ -720,7 +721,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
         offlineTableConfig.toJsonString());
 
     String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
-    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    TableConfigs tableConfigsResponse = TableConfigFactory.tableConfigsFromString(response);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
     Assert.assertEquals(tableConfigsResponse.getSchema().getSchemaName(), tableName);
