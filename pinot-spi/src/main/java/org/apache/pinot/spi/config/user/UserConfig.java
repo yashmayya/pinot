@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Objects;
 import javax.annotation.Nullable;
 import org.apache.pinot.spi.config.BaseJsonConfig;
+import org.apache.pinot.spi.utils.JsonUtils;
 
 
 public class UserConfig extends BaseJsonConfig {
@@ -109,8 +110,13 @@ public class UserConfig extends BaseJsonConfig {
   }
 
   @JsonProperty(PERMISSIONS_KEY)
-  public List<AccessType> getPermissios() {
+  public List<AccessType> getPermissions() {
     return _permissions;
+  }
+
+  @Deprecated
+  public List<AccessType> getPermissios() {
+    return getPermissions();
   }
 
   @JsonProperty(COMPONET_KEY)
@@ -146,5 +152,12 @@ public class UserConfig extends BaseJsonConfig {
   @Override
   public int hashCode() {
     return Objects.hash(super.hashCode(), _username, _componentType);
+  }
+
+  public static void main(String[] args) {
+    // Create user config and serialize to JSON string
+    UserConfig userConfig =
+        new UserConfig("username", "password", "CONTROLLER", "ADMIN", null, null, List.of(AccessType.READ));
+    System.out.println(JsonUtils.objectToJsonNode(userConfig));
   }
 }
